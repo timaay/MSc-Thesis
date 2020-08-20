@@ -306,8 +306,6 @@ ggplot(data = dsFFcomplete) +
 
 ```
 
-##Use boxplots to investigate the distributions
-#ggbetweenstats is PRETTY
 ```{r}
 #Create a boxplot for Trip Duration
 boxplot(dsFFcomplete$`Trip Duration`)
@@ -763,7 +761,6 @@ DensityDurationVehicleType <- ggplot(dsAllTest, aes(x = `Trip Duration`/60, colo
 ggsave("DensityDurationVehicleType.pdf", DensityDurationVehicleType)
 
 
-#SUPER GOOD
 #We see that FFS and SBB are most similar with a high number of very short trips (around 5 minutes)
 #However, SBB has incredibly long tail (resulting in highest average of 24), likely due to the lower cost of long duration bike trips compared to other modes
 #FFB is characterized with a smoother distribution, being used for significantly longer durations than FFS (Average of 20min vs just 12min for FFS)
