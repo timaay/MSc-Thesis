@@ -1,0 +1,1522 @@
+---
+title: "Thesis_FF_Cleaning"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Load Libraries
+```{r}
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(forcats)
+library(scales)
+library(qwraps2)
+library(rlang)
+library(cluster.datasets)
+library(stargazer)
+library(table1)
+library(tidyverse)
+library(ggstatsplot)
+library(ggsci)
+library(lubridate)
+library(lattice)
+library(tikzDevice)
+library(extrafont)
+```
+
+##Set Working Directory
+```{r}
+setwd("~/Erasmus University/Master/Thesis/Scripts")
+```
+
+##Load SBB Trip Data
+```{r}
+#Import dockless csv and change strings to datetime
+#X observations
+dsSBBRawImport <- read_csv("~/Erasmus University/Master/Thesis/Data (Thesis)/Raw Data/260620_Austin_B-Cycle_Trips.csv", 
+    col_types = cols(`Checkout Date` = col_date(format = "%m/%d/%Y"), 
+                     `Bicycle ID` = col_character(),
+                     `Trip ID` = col_character(),
+        `Checkout Time` = col_time(format = "%H:%M:%S")
+        ))
+
+View(dsSBBRawImport)
+
+#Create duplicate for preprocessing
+dsSBBRaw <- dsSBBRawImport
+
+```
+
+##Load SBB Station Data
+```{r}
+#Import dockless csv and change strings to datetime
+#X observations
+dsStationRawImport <- read_csv("~/Erasmus University/Master/Thesis/Data (Thesis)/Raw Data/260620_Austin_B-Cycle_Kiosk_Locations.csv")
+
+View(dsStationRawImport)
+
+#Create duplicate for preprocessing
+dsStationRaw <- dsStationRawImport
+```
+
+##Date Operations (Create and round Start and End Time)
+```{r}
+#Create Start Time Column in Datetime
+dsSBBRaw$`Start Time` <- ymd(dsSBBRaw$`Checkout Date`) + hms(dsSBBRaw$`Checkout Time`)
+
+#Create End Time Column in Datetime by adding trip duration to Start Time
+dsSBBRaw$`End Time` <- ymd_hms(dsSBBRaw$`Start Time`) + dminutes(dsSBBRaw$`Trip Duration Minutes`)
+
+#Round Dates to nearest 15 min
+dsSBBRaw$`Start Time Round` <- round_date(dsSBBRaw$`Start Time`, "15 minutes")
+dsSBBRaw$`End Time Round` <- round_date(dsSBBRaw$`End Time`, "15 minutes")
+
+```
+
+##Merge Station and SBB Trip Datasets
+```{r}
+
+#Merge Lat&Long for Checkout Kiosk ID
+dsSBBRawMerged <- merge(x = dsSBBRaw, y = dsStationRaw[ , c(1,4:5)], by.x = c("Checkout Kiosk ID"), by.y = c("Kiosk ID"))
+
+#Change Latitude and Longitude to Start Lat & Long
+dsSBBRawMerged[,"Start Latitude"] <- dsSBBRawMerged[,"Latitude"]
+dsSBBRawMerged[,"Start Longitude"] <- dsSBBRawMerged[,"Longitude"]
+#Remove names Latitude and Longitude
+dsSBBRawMerged <- dsSBBRawMerged[ , !names(dsSBBRawMerged) %in% c("Latitude", "Longitude")]
+
+#Merge Lat&Long for Return Kiosk ID
+dsSBBRawMerged <- merge(x = dsSBBRawMerged, y = dsStationRaw[ , c(1,4:5)], by.x = c("Return Kiosk ID"), by.y = c("Kiosk ID"))
+
+#Change Latitude and Longitude to Start Lat & Long
+dsSBBRawMerged[,"End Latitude"] <- dsSBBRawMerged[,"Latitude"]
+dsSBBRawMerged[,"End Longitude"] <- dsSBBRawMerged[,"Longitude"]
+#Remove names Latitude and Longitude
+dsSBBRawMerged <- dsSBBRawMerged[ , !names(dsSBBRawMerged) %in% c("Latitude", "Longitude")]
+
+```
+
+##Datetime as POSIXct and Filter April 5th, 2018 to February 16th, 2019
+```{r}
+#Makes sure that Start and End time columns are POSIXct with UTC as default - ALWAYS USE ymd_hms or as.POSIXct("", tz="UTC")
+#ymd makes UTC default
+dsSBBRawMerged$`Start Time Round` <- ymd_hms(dsSBBRawMerged$`Start Time Round`)
+dsSBBRawMerged$`End Time Round` <- ymd_hms(dsSBBRawMerged$`End Time Round`)
+
+#Subset data based on given data range
+dsSBBRawMerged <- dsSBBRawMerged %>% 
+  filter(dsSBBRawMerged$`Start Time Round` >= ymd_hms("2018-04-05 00:00:00") & dsSBBRawMerged$`Start Time Round` < ymd_hms("2019-02-17 00:00:00"))
+
+```
+
+##Check for NAs
+```{r}
+#Return rows with NAs present in any column
+dsSBBNAs <- dsSBBRawMerged[rowSums(is.na(dsSBBRawMerged)) > 0,] #All trips have missing values 279,305 over study period
+
+#NAs are because of Year and Month column
+#Remove both columns
+dsSBBRawMerged[ ,c('Month', 'Year')] <- list(NULL)
+
+#Check number of NAs now
+dsSBBNAs <- dsSBBRawMerged[rowSums(is.na(dsSBBRawMerged[,c(1:4,6:18)])) > 0,] #13,839 missing values (213 of these missing membership info)/ 279,305
+
+#13,626 observations having missing Bike IDs
+#remove all non-bike ID NAs from dsSBBRawMerged
+dsSBBcomplete <- anti_join(dsSBBRawMerged, dsSBBNAs) #279,092 observations remain
+```
+
+#Prepare for merge with FF Data
+```{r}
+#Remove columns Start Time and End Time
+dsSBBcomplete <- dsSBBcomplete[ , !names(dsSBBcomplete) %in% c("Start Time", "End Time")]
+#Remove columns Checkout Date and Checkout Time
+dsSBBcomplete <- dsSBBcomplete[ , !names(dsSBBcomplete) %in% c("Checkout Date", "Checkout Time")]
+
+#Change Time Names
+names(dsSBBcomplete)[names(dsSBBcomplete) == "Start Time Round"] <- "Start Time"
+names(dsSBBcomplete)[names(dsSBBcomplete) == "End Time Round"] <- "End Time"
+
+#Change Trip ID name and convert to string
+names(dsSBBcomplete)[names(dsSBBcomplete) == "Trip ID"] <- "ID"
+
+#Change Trip ID name and convert to string
+names(dsSBBcomplete)[names(dsSBBcomplete) == "Bicycle ID"] <- "Device ID"
+
+#Create Column Vehicle Type with value SBB
+dsSBBcomplete$`Vehicle Type` <- "SBB"
+
+#Change Trip Duration to seconds
+dsSBBcomplete$`Trip Duration` <- dsSBBcomplete$`Trip Duration Minutes`*60
+#Delete Trip Duration in minute column
+dsSBBcomplete[,"Trip Duration Minutes"] <- list(NULL)
+
+#Create variable Month
+dsSBBcomplete$`Month` <- month(dsSBBcomplete$`Start Time`)
+#Create variable Hour
+dsSBBcomplete$`Hour` <- hour(dsSBBcomplete$`Start Time`)
+#Create variable Day of Week
+dsSBBcomplete$`Day of Week` <- wday(dsSBBcomplete$`Start Time`) - 1
+#Create variable Year
+dsSBBcomplete$`Year` <- year(dsSBBcomplete$`Start Time`)
+
+```
+
+##Realism Parameter
+```{r}
+#Duration
+#Trip duration should be between 60s and 86400 (24h)
+
+#Removes rows with strange Trip Duration values
+dsSBBRealism <- dsSBBcomplete %>% 
+  filter(between(dsSBBcomplete$`Trip Duration`, 60, 86400)) #Removes 4942 trips, 274,150 remaining
+
+#Used for detailed membership investigation
+dsSBBcomplete <- dsSBBcomplete %>% 
+  filter(between(dsSBBcomplete$`Trip Duration`, 60, 86400)) #Removes 4942 trips, 274,150 remaining
+
+```
+
+##Simplify membership into Casual or Member
+```{r}
+#summary of data
+#dsSBBcomplete %>% summary()
+
+#check what types of memberships there are
+#unique(dsSBBcomplete$`Membership Type`)
+
+#ifelse that if listed is casual otherwise member
+dsSBBRealism$`Membership Type` <- ifelse(dsSBBRealism$`Membership Type` %in% c("24 Hour Walk Up Pass", "3-Day Explorer", "3-Day Weekender", "Walk Up", "$1 Pay by Trip Fall Special", "Weekender", "Explorer", "Single Trip", "$1 Pay by Trip Winter Special"),
+                                          "Casual",
+                                          "Member")
+
+```
+
+
+
+
+##Load FF Data
+```{r}
+#Import dockless csv and change strings to datetime
+#X observations
+dsFFRawImport <- read_csv("~/Erasmus University/Master/Thesis/Data (Thesis)/Raw Data/170219_Dockless_Vehicle_Trips.csv",
+                          col_types = cols(`End Time` = col_datetime(format = "%m/%d/%Y %I:%M:%S %p"),
+                                           `Start Time` = col_datetime(format = "%m/%d/%Y %I:%M:%S %p")))
+
+View(dsFFRawImport)
+
+#Create duplicate for preprocessing
+dsFFRaw <- dsFFRawImport
+
+```
+
+##Create speed variable
+```{r}
+#Create speed variable Distance/Time
+dsFFRaw$'Trip Speed' <- (dsFFRaw$`Trip Distance`)/(dsFFRaw$`Trip Duration`)
+
+#change column order
+dsFFRaw <- dsFFRaw[,c(1:5,16,6:15)]
+```
+
+
+##Check and remove missing data points
+```{r}
+#drop origin and destination cell ID
+dsFFRaw[ ,c('Origin Cell ID', 'Destination Cell ID')] <- list(NULL)
+#drop modified date
+dsFFRaw[ ,c('Modified Date')] <- list(NULL)
+#drop council district start and end
+dsFFRaw[ c('Council District (Start)', 'Council District (End)')] <- list(NULL)
+
+#Return rows with NAs present in any column
+dsFFNAs <- dsFFRaw[rowSums(is.na(dsFFRaw)) > 0,] #46,999/2,832,775 observations with missing values
+
+
+#remove all identified NAs from dsFFRaw
+dsFFcomplete <- anti_join(dsFFRaw, dsFFNAs) #2,785,665 observations remain
+
+```
+
+##Check for duplicates
+```{r}
+#Check and remove duplicate rows
+dsFFcomplete <- distinct(dsFFcomplete)
+
+#Check to make sure individual IDs of column one are indeed unique
+#dupli = dsDocklessComplete[,c(1)] # select columns to check duplicates
+#dsDocklessDupli <- dsDocklessComplete[duplicated(dupli) | duplicated(dupli, fromLast=TRUE),]
+
+#no duplicate trip IDs found
+
+#Check for duplicates with same trip characteristics, 835 duplicates found
+#duplis = dsFFcomplete[,c(3:7,12:15)]
+#dsFFDupli <- dsFFcomplete[duplicated(duplis) | duplicated(duplis, fromLast=TRUE),]
+```
+
+##Trip summary statistics before cleaning
+```{r}
+#Add SBB
+#https://cran.r-project.org/web/packages/table1/vignettes/table1-examples.html
+
+table1::label(dsFFcomplete$`Trip Duration`) <- "Trip Duration"
+table1::label(dsFFcomplete$`Trip Distance`) <- "Trip Distance"
+table1::label(dsFFcomplete$`Trip Speed`) <- "Trip Speed"
+
+
+my.render.cont1 <- function(x) {
+    with(stats.apply.rounding(stats.default(x), digits=2), c("",
+        "Mean (SD)"=sprintf("%s (&plusmn; %s)", MEAN, SD)))
+}
+
+
+table1::table1(~dsFFcomplete$`Trip Duration` + dsFFcomplete$`Trip Distance` + dsFFcomplete$`Trip Speed` | dsFFcomplete$`Vehicle Type`,
+               data = dsFFcomplete, overall = "All Micromobility", render.continuous=my.render.cont1)
+
+#75,816 bikes, 2,709,960 scooters, total 2,785,776
+
+```
+
+##Search distributions for errors/outliers in data
+```{r}
+#Continuous variables = Histogram
+#Categorical variables = Bar graph
+
+#%<% passes the left hand side into the argument on the right: X %>% Y() = Y(X)
+dsFFcomplete %>% summary()
+
+#Bar graph, trip count by vehicle type
+ggplot(data = dsFFcomplete) +
+  geom_bar(mapping = aes(x = `Vehicle Type`))
+
+#Histogram of trip duration
+#We notice there are obviously small occurences of insane duration
+ggplot(data = dsFFcomplete) +
+  geom_histogram(mapping = aes(x = `Trip Duration`), binwidth = 1000)
+
+#Histogram of trip distance
+#Picture is blank so something weird is happening
+#ggplot(data = dsFFcomplete) +
+#  geom_histogram(mapping = aes(x = `Trip Distance`), binwidth = 10000)
+
+```
+
+##Use boxplots to investigate the distributions
+#ggbetweenstats is PRETTY
+```{r}
+#Create a boxplot for Trip Duration
+boxplot(dsFFcomplete$`Trip Duration`)
+
+#Create a boxplot that labels the outliers
+
+
+#Takes long to run
+#https://indrajeetpatil.github.io/ggstatsplot/articles/web_only/ggbetweenstats.html
+# bplotDuration <- 
+#   ggstatsplot::ggbetweenstats(
+#     data = dsFFcomplete,
+#     x = 'Vehicle Type', 
+#     y = 'Trip Duration',
+#     type = "p",#Parametric
+#     plot.type = "box",
+#     effsize.type = "d"#Cohens D
+#     conf.level = 0.99
+#     title = "Trip Duration"
+#     package = "ggsci"
+#     palette = "Greys"
+#     outlier.tagging = FALSE,
+#     messages = FALSE
+#     )
+# 
+# ggbetweenstats(dsFFcomplete,
+# 'Vehicle Type', 'Trip Distance',
+# plot.type = "box", outlier.tagging = FALSE, palette = "Greys")
+
+```
+
+
+
+##Show percentile and count below or above given percentile
+```{r}
+dsFFcomplete %>%
+  group_by(`Vehicle Type`) %>% 
+  summarize(Percentile_99 = quantile(`Trip Duration`,0.999),n_sup = sum(`Trip Duration` > Percentile_99))
+
+#At 99.9 percentile: 76 bikes have a trip duration greater than 56548.78s (15.7 hours)
+#                     2709 scooters have a trip duration greater than 7932s (2.2 hours)
+
+```
+
+
+
+##Set Realism Parameters
+```{r}
+#Distance
+#Scooter trip distance 100m to 32000m (32km)
+#Bike trip distance 100m to 65000m (65km)
+
+##Keep rows where scooters have a trip distance between 100-32000m
+#cuts 461,641 trips
+dsFFRealism <- subset(dsFFcomplete, !(`Vehicle Type` == "scooter" & (`Trip Distance` < 100 | `Trip Distance` > 32000)))
+
+##Keep rows where bicycles have a trip distance between 100-65000m
+#cuts 6,205 trips
+dsFFRealism <- subset(dsFFRealism, !(`Vehicle Type` == "bicycle" & (`Trip Distance` < 100 | `Trip Distance` > 65000)))
+
+
+#Duration
+#For both vehicle types trip duration should be between 60s and 86400 (24h)
+
+#Removes rows with strange Trip Duration values
+dsFFRealism <- dsFFRealism %>% 
+  filter(between(dsFFRealism$`Trip Duration`, 60, 86400))
+
+
+#Speed
+#Scooter max speed is 15mph = 6.701m/s
+#Bicycles dont have max speed but realistically = 40kmh = 11.111m/s
+
+##Keep rows where scooters have a trip speed below 6.8
+dsFFRealism <- subset(dsFFRealism, !(`Vehicle Type` == "scooter" & `Trip Speed` > 6.8))
+
+##Keep rows where bikes have a trip speed below 11.111
+dsFFRealism <- subset(dsFFRealism, !(`Vehicle Type` == "bicycle" & `Trip Speed` > 11.2))
+
+#This has resulted in scrapping 477,320 trips
+
+```
+
+##Change scooter to FFS and Bicycle to FFB
+```{r}
+
+dsFFRealism$`Vehicle Type`[dsFFRealism$`Vehicle Type` == "scooter"] <- "FFS"
+dsFFRealism$`Vehicle Type`[dsFFRealism$`Vehicle Type` == "bicycle"] <- "FFB"
+
+```
+
+##Datetime as POSIXct and Filter April 5th, 2018 to February 16th, 2019
+```{r}
+#Makes sure that Start and End time columns are POSIXct with UTC as default - ALWAYS USE ymd_hms or as.POSIXct("", tz="UTC")
+#ymd makes UTC default
+dsFFRealism$`Start Time` <- ymd_hms(dsFFRealism$`Start Time`)
+dsFFRealism$`End Time` <- ymd_hms(dsFFRealism$`End Time`)
+
+#Subset data based on given data range
+dsFFRealism <- dsFFRealism %>% 
+  filter(dsFFRealism$`Start Time` >= ymd_hms("2018-04-05 00:00:00") & dsFFRealism$`Start Time` < ymd_hms("2019-02-17 00:00:00"))
+
+```
+
+##Post realism summary statistic
+```{r}
+table1::label(dsFFRealism$`Trip Duration`) <- "Trip Duration (s)"
+table1::label(dsFFRealism$`Trip Distance`) <- "Trip Distance (m)"
+table1::label(dsFFRealism$`Trip Speed`) <- "Trip Speed (m/s)"
+
+
+table1::table1(~dsFFRealism$`Trip Duration` + dsFFRealism$`Trip Distance` + dsFFRealism$`Trip Speed` | dsFFRealism$`Vehicle Type`,
+               data = dsFFRealism, overall = "All Micromobility", render.continuous=my.render.cont1)
+
+#REDO
+
+#Before realism
+#75,816 bikes, 2,709,960 scooters, total 2,785,776
+#After realism parameters
+#69,234 bikes, 2,239,222 scooters, total 2,308,456
+
+#Amount scrapped
+#6,582 bikes, 470,738 scooters, total 477,320
+```
+
+##Merge datasets
+```{r}
+dsAllTest <- bind_rows(dsFFRealism, dsSBBRealism) #2,573,461 micromobility trips 5/4/2018 - 16/2/2019 
+```
+
+
+##Summary
+```{r}
+summary(dsAllTest)
+
+table1::label(dsAllTest$`Trip Duration`) <- "Trip Duration (s)"
+table1::label(dsAllTest$`Trip Distance`) <- "Trip Distance (m)"
+table1::label(dsAllTest$`Trip Speed`) <- "Trip Speed (m/s)"
+
+
+table1::table1(~dsAllTest$`Trip Duration` + dsAllTest$`Trip Distance` + dsAllTest$`Trip Speed` | dsAllTest$`Vehicle Type`,
+               data = dsAllTest, overall = "All Micromobility")
+
+```
+
+##Summary Table Split by Membership Type and Vehicle Type
+```{r}
+table1::label(dsAllTest$`Trip Duration`) <- "Trip Duration (s)"
+table1::label(dsAllTest$`Trip Distance`) <- "Trip Distance (m)"
+table1::label(dsAllTest$`Trip Speed`) <- "Trip Speed (m/s)"
+
+
+table1::table1(~`Trip Duration` + `Trip Distance` + `Trip Speed` | `Membership Type`*`Vehicle Type`,
+               data = dsAllTest, overall = "All Micromobility")
+
+
+```
+
+
+##Create Weekend Variable
+##Make Public Holidays to Weekened
+```{r}
+
+dsAllTest$`Day Type` <- ifelse(dsAllTest$`Day of Week` == 0 | dsAllTest$`Day of Week` ==6,
+                                          "Weekend",
+                                          "Weekday")
+
+Holidays <- ymd(c("2018-05-28", "2018-07-04", "2018-09-03", "2018-10-08", "2018-11-12", "2018-11-22", "2018-11-23", "2018-12-25", "2019-01-01", "2019-01-21"))
+
+StartDate <- date(dsAllTest$`Start Time`)
+
+dsAllTest$`Holiday Check` <- StartDate %in% Holidays
+dsAllTest[ ,c('Holiday Check')] <- list(NULL)
+
+dsAllTest$`Day Type` <- ifelse(StartDate %in% Holidays, "Weekend", dsAllTest$`Day Type`)
+
+```
+
+##Create Vehicle Split Variable
+```{r}
+#Variable to split SBB casual and SBB member into distinct groups
+
+dsAllTest$`Vehicle Split` <- 
+  ifelse(dsAllTest$`Membership Type` %in% c("Member", "Casual"),
+                                          paste("SBB", as.character(dsAllTest$`Membership Type`, sep=" ")),
+                                          dsAllTest$`Vehicle Type`)
+
+
+```
+
+#Save as CSV - AllMMData
+```{r}
+#write.csv(dsAllTest,"C:\\Users\\timge\\Documents\\Erasmus University\\Master\\Thesis\\Data (Thesis)\\Cleaned\\Final\\AllMMData.csv", row.names = TRUE)
+
+```
+
+#Filter data to specific month
+#Save as csv
+```{r}
+
+#October Subset
+dsOctoberSubset <- dsAllTest %>% filter(`Start Time` >= as.Date("2018-10-01") & `Start Time` <= as.Date("2018-10-31"))
+
+write.csv(dsOctoberSubset,"C:\\Users\\timge\\Documents\\Erasmus University\\Master\\Thesis\\Data (Thesis)\\Cleaned\\Final\\AllOctoberSubset.csv", row.names = TRUE)
+
+#IntroductionSubset
+dsAprSep <- dsAllTest %>% filter(`Start Time` >= as.Date("2018-04-01") & `Start Time` <= as.Date("2018-9-30"))
+
+write.csv(dsAprSep,"C:\\Users\\timge\\Documents\\Erasmus University\\Master\\Thesis\\Data (Thesis)\\Cleaned\\Final\\AllAprilSeptember.csv", row.names = TRUE)
+```
+
+########################################## STATION BASED DATA ######################################################
+
+#Investigate membership types
+```{r}
+
+#Count N of each membership type
+TableMemberShipType <- dsSBBcomplete %>%
+        group_by(`Membership Type`) %>%
+        tally()
+
+sum(TableMemberShipType$n)
+#178,050 student membership trips / 274,150 total trips = 64.946% of all trips were done by UT student members
+#216,287 member trips total - 82.321% of all member trips are UT student members
+#With a total enrolment of 40,804 students = 4.365 trips per student
+
+BarMembershipTypes <- dsSBBcomplete %>% 
+  group_by(`Membership Type`) %>%
+  count %>%
+  filter(n > 1000) %>%
+  ggplot(aes(x = reorder(`Membership Type`, -n), y = n, fill=`Membership Type`)) + 
+  geom_bar(stat = "identity") +
+  labs(title = "Total Trips by Membership Type", x ="Membership Type", y = "Number of Trips") +
+  scale_y_continuous(breaks=seq(0,200000,25000)) +
+  scale_fill_grey() +
+  theme(text = element_text(family="CM Roman"),
+        legend.position = "none", 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"),
+        axis.text.x=element_text(angle=90,hjust=1,vjust=0.5)) 
+ggsave("BarMembershipTypes.pdf", plot = BarMembershipTypes)
+
+
+#Table showing count by membership type over Start Date
+#Create column changes datetime to date
+dsSBBcomplete$`Start Date` <- round_date(dsSBBcomplete$`Start Time`, 'day')
+
+LowMemberTypes <- dsSBBcomplete %>%
+    group_by(`Membership Type`) %>%
+    tally() %>%
+    filter(n > 5000) %>%
+    select(`Membership Type`)
+
+
+TableDateMemberShipType <- dsSBBcomplete %>%
+filter(`Membership Type` %in% LowMemberTypes$`Membership Type`) %>%
+mutate(day = `Start Date`) %>%
+group_by(day, `Membership Type`) %>%
+tally()
+
+#Frequency line chart showing count by membership type over Start Date
+LineMembershipTypeDate <- ggplot(TableDateMemberShipType, aes(x=day,y=n, group=(`Membership Type`)))+
+  stat_summary(aes(color=(`Membership Type`)), geom="line") + geom_smooth(method = "lm") +
+  labs(title = "Total Trips by Membership Type", x ="Date", y = "Number of Trips") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey")) 
+ggsave("MembershipTypeDate.pdf", plot = LineMembershipTypeDate)
+
+#Trash
+
+#Same as above comparing membership types but by top 6 membership types instead of n count
+LowMemberTypesTop6 <- dsSBBcomplete %>%
+    group_by(`Membership Type`) %>%
+    tally() %>%
+    top_n(n = 6, wt = n) %>%
+    select(`Membership Type`)
+
+TableDateMemberShipTypeTop6 <- dsSBBcomplete %>%
+filter(`Membership Type` %in% LowMemberTypesTop6$`Membership Type`) %>%
+mutate(day = `Start Date`) %>%
+group_by(day, `Membership Type`) %>%
+tally()
+
+TableDateMemberShipTypeTop6$day <- as.Date(TableDateMemberShipTypeTop6$day)
+#Frequency line chart showing count by Top 6 membership type over Start Date
+LineMembershipTypeDateTop6edit <- ggplot(TableDateMemberShipTypeTop6, aes(x=round_date(`day`, 'week'),y=n, group=(`Membership Type`)))+
+  stat_summary(aes(color=(`Membership Type`)), geom="line") + 
+  #geom_smooth(method = "lm") +
+  labs(title = "Total Trips by Membership Type", x ="Date", y = "Number of Trips") +
+  scale_y_continuous(labels = comma) +
+  scale_x_date(date_labels="%b",
+             date_breaks  ="1 month") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        axis.text.y = element_text(margin = margin(t = 0, r = 2, b = 0, l = 2)),
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 5, l = 0)),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey")) 
+ggsave("MembershipTypeDateTop6edit.pdf", plot = LineMembershipTypeDateTop6edit)
+
+#Casual Trip Frequencies
+CasualMembershipList <- c("24 Hour Walk Up Pass", "3-Day Explorer", "3-Day Weekender", "Walk Up", "$1 Pay by Trip Fall Special", "Weekender", "Explorer", "Single Trip", "$1 Pay by Trip Winter Special")
+
+dsCasualMemberships <- as.data.frame(matrix(unlist(CasualMembershipList),nrow=length(CasualMembershipList),byrow=TRUE))
+names(dsCasualMemberships)[1] <- "Membership Type"
+
+CasualTrippers <- dsSBBcomplete %>%
+    group_by(`Membership Type`) %>%
+    tally() %>%
+    top_n(n = 10, wt = n) %>%
+    filter(`Membership Type` %in% dsCasualMemberships$`Membership Type`) %>%
+    select(`Membership Type`)
+
+TableDateMemberShipTypeCasualTrip <- dsSBBcomplete %>%
+filter(`Membership Type` %in% CasualTrippers$`Membership Type`) %>%
+mutate(day = `Start Date`) %>%
+group_by(day, `Membership Type`) %>%
+tally()
+
+#Frequency line chart showing count by membership type over Start Date
+LineMembershipTypeDateCasualTrip <- ggplot(TableDateMemberShipTypeCasualTrip, aes(x=round_date(`day`, 'week'),y=n, group=(`Membership Type`)))+
+  stat_summary(aes(color=(`Membership Type`)), geom="line") + geom_smooth(method = "lm") +
+  labs(title = "Total Trips by Membership Type", x ="Date", y = "Number of Trips") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey")) 
+ggsave("MembershipTypeDateCasualTrip.pdf", plot = LineMembershipTypeDateCasualTrip)
+
+#Density Plot Split by Casual SBB membership type
+LineCasualMembershipSplitDate <- ggplot(TableDateMemberShipTypeCasualTrip, aes(x= `day`, color= `Membership Type`)) +
+  geom_density() +
+  theme(text=element_text(family="CM Roman"))
+
+ggsave("LineCasualMembershipSplitDate.pdf", LineCasualMembershipSplitDate)
+
+#Member Trip Frequencies
+dsMemberTypes <- dsSBBcomplete %>%
+    group_by(`Membership Type`) %>%
+    distinct(`Membership Type`) %>%
+    filter(!`Membership Type` %in% dsCasualMemberships$`Membership Type`) %>%
+    select(`Membership Type`)
+
+MemberTrippers <- dsSBBcomplete %>%
+    group_by(`Membership Type`) %>%
+    tally() %>%
+    top_n(n = 10, wt = n) %>%
+    filter(`Membership Type` %in% dsMemberTypes$`Membership Type`) %>%
+    select(`Membership Type`)
+
+TableDateMemberShipTypeMemberTrip <- dsSBBcomplete %>%
+filter(`Membership Type` %in% MemberTrippers$`Membership Type`) %>%
+mutate(day = `Start Date`) %>%
+group_by(day, `Membership Type`) %>%
+tally()
+
+#Frequency line chart showing count by membership type over Start Date
+LineMembershipTypeDateMemberTrip <- ggplot(TableDateMemberShipTypeMemberTrip, aes(x=round_date(`day`, 'week'),y=n, group=(`Membership Type`)))+
+  stat_summary(aes(color=(`Membership Type`)), geom="line") + geom_smooth(method = "lm") +
+  labs(title = "Total Trips by Membership Type", x ="Date", y = "Number of Trips") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey")) 
+ggsave("MembershipTypeDateMemberTrip.pdf", plot = LineMembershipTypeDateMemberTrip)
+
+#Density Plot Split by Member SBB membership type
+##Local 365 and Local 365+Guest pass have same density line as each guest trip must be accompanied by a member trip
+LineMemberMembershipSplitDate <- ggplot(TableDateMemberShipTypeMemberTrip, aes(x= `day`, color= `Membership Type`)) +
+  geom_density() +
+  labs(title = "Trip Density by Membership Type", x ="Date", y = "Density") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("LineMemberMembershipSplitDate.pdf", LineMemberMembershipSplitDate)
+
+
+#Bar graph of Casual vs Member SBB
+#216,287 Members vs 57,863 Casual
+BarMembervsCasual <- dsSBBRealism %>% 
+  group_by(`Membership Type`) %>%
+  count %>%
+  filter(n > 1000) %>%
+  ggplot(aes(x = reorder(`Membership Type`, -n), y = n, fill=`Membership Type`)) + 
+  geom_bar(stat = "identity") +
+  scale_fill_grey() +
+  geom_text(aes(label= paste("N = ", comma(n), sep = "" )), position=position_dodge(width=0.9), vjust=-0.25) +
+  labs(title = "Total Trips by Membership Type", x ="Membership Type", y = "Number of Trips") +
+  scale_y_continuous(breaks=seq(0,200000,25000)) +
+  theme(text = element_text(family="CM Roman"),
+        legend.position = "none", 
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("BarMembervsCasual.pdf", plot = BarMembervsCasual)
+
+```
+
+########################################## DESCRIPTIVE COMPARISON CHARTS ######################################################
+
+
+#Duration Distribution by Vehicle Type
+```{r}
+
+#Aggregate column 4 (Trip Duration)
+muDuration <- aggregate(dsAllTest[, 4], list(dsAllTest$`Vehicle Type`), mean)
+names(muDuration)[1] <- "Vehicle Type"
+muDuration$`Trip Duration` <- round(muDuration$`Trip Duration`/60,0)
+
+LineDurationVehicleType <- ggplot(data = dsAllTest, aes(x = `Trip Duration`/60, color = `Vehicle Type`)) + 
+  geom_line(aes(group = `Vehicle Type`), stat="bin") +
+  geom_vline(data=muDuration, aes(xintercept=`Trip Duration`, color= `Vehicle Type`), linetype="dashed") +
+  xlim(0, 50) +
+  scale_y_continuous(label=comma) +
+  #annotate("text", size=3, x =40, y = 350000 , label = paste("Mean:", muDuration[1,2]), parse = TRUE) +
+  labs(title = 'Trip Duration by Vehicle Type', x ="Trip Duration (Minutes)", y = "Number of Trips") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("LineDurationVehicleType.pdf", plot = LineDurationVehicleType)
+
+#Density Plot 
+DensityDurationVehicleType <- ggplot(dsAllTest, aes(x = `Trip Duration`/60, color = `Vehicle Type`)) +
+  geom_density() +
+  geom_vline(data=muDuration, aes(xintercept=`Trip Duration`, color= `Vehicle Type`), linetype="dashed") +
+  xlim(0, 50) +
+  labs(title = "Trip Duration Density by Vehicle Type", x ="Trip Duration (Minutes)", y = "Density") +
+  theme(text = element_text(family="CM Roman"),
+      legend.title = element_blank(),
+      panel.grid.major.x = element_blank(), 
+      panel.grid.major.y = element_line( size=.01, color="grey" ), 
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "grey"))
+ggsave("DensityDurationVehicleType.pdf", DensityDurationVehicleType)
+
+
+#SUPER GOOD
+#We see that FFS and SBB are most similar with a high number of very short trips (around 5 minutes)
+#However, SBB has incredibly long tail (resulting in highest average of 24), likely due to the lower cost of long duration bike trips compared to other modes
+#FFB is characterized with a smoother distribution, being used for significantly longer durations than FFS (Average of 20min vs just 12min for FFS)
+
+
+
+
+```
+
+#Duration Distribution for Vehicle Split
+```{r}
+#Aggregate column 4 (Trip Duration)
+muDurationSplit <- aggregate(dsAllTest[, 4], list(dsAllTest$`Vehicle Split`), mean)
+names(muDurationSplit)[1] <- "Vehicle Split"
+muDurationSplit$`Trip Duration` <- round(muDurationSplit$`Trip Duration`/60,0)
+
+LineDurationVehicleSplit <- ggplot(data = dsAllTest, aes(x = `Trip Duration`/60, color = `Vehicle Split`)) + 
+  geom_line(aes(group = `Vehicle Split`), stat="bin") +
+  geom_vline(data=muDurationSplit, aes(xintercept=muDurationSplit$`Trip Duration`, color= muDurationSplit$`Vehicle Split`), linetype="dashed") +
+  xlim(0, 50) +
+  scale_y_continuous(label=comma) +
+  #annotate("text", size=3, x =40, y = 350000 , label = paste("Mean:", muDuration[1,2]), parse = TRUE) +
+  labs(title = 'Trip Duration by Vehicle Type', x ="Trip Duration (Minutes)", y = "Number of Trips") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("LineDurationVehicleSplit.pdf", plot = LineDurationVehicleSplit)
+
+#Density Plot 
+DensityDurationVehicleSplit <- ggplot(dsAllTest, aes(x = `Trip Duration`/60, color = `Vehicle Split`)) +
+  geom_density(adjust = 2) +
+  geom_vline(data=muDurationSplit, aes(xintercept=`Trip Duration`, color= `Vehicle Split`), linetype="dashed") +
+  xlim(0, 50) +
+  labs(title = "Trip Duration Density by Vehicle Type", x ="Trip Duration (Minutes)", y = "Density") +
+  theme(text = element_text(family="CM Roman"),
+      legend.title = element_blank(),
+      panel.grid.major.x = element_blank(), 
+      panel.grid.major.y = element_line( size=.01, color="grey" ), 
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "grey"))
+ggsave("DensityDurationVehicleSplit.pdf", DensityDurationVehicleSplit)
+
+#Average Distance of FFB is 3068m compared to 1573m for FFS
+#So they have longer duration and travel further
+
+TableDurationCount <- dsAllTest %>%
+filter(`Trip Duration` < 600) %>%
+group_by(`Vehicle Split`) %>%
+tally()
+
+TableTotalCountBySplit <- dsAllTest %>%
+group_by(`Vehicle Split`) %>%
+tally()
+
+#1,431,256 / 2,230,077 = 64.2% of trips are within 10 minutes for FFS
+#29,792 / 69,234 = 43.0% of FBB trips are within 10min
+#6,981 /  57,863 = 12.1% SBB Casual Trips are within 10 minutes
+#156,198 / 216,287 = 72.2% of SBB Member trips are within 10 minutes
+
+#We make a suprising finding that in Austin, members of public bikesharing systems behave more similarly to FFS users than causal members.
+#This is likely because UT students are using their membership for short, quick rides around, to, and from campus
+```
+
+#Distance Distribution by Vehicle Type
+```{r}
+
+#Aggregate column 5 (Trip Distance)
+muDistance <- aggregate(dsAllTest[, 5], list(dsAllTest$`Vehicle Type`), mean)
+names(muDistance)[1] <- "Vehicle Type"
+muDistance$`Trip Distance` <- round(muDistance$`Trip Distance`,0)
+
+LineDistanceVehicleType <- ggplot(data = dsAllTest, aes(x = `Trip Distance`, color = `Vehicle Type`)) + 
+  geom_line(aes(group = `Vehicle Type`), stat="bin") +
+  geom_vline(data=muDistance, aes(xintercept=`Trip Distance`, color= `Vehicle Type`), linetype="dashed") +
+  scale_x_continuous(breaks=c(0,1000,2000,3000,4000,5000,6000,7000,8000,9000,10000),
+                  limits = c(0,10000),
+                  labels = comma) +
+  scale_y_continuous(label=comma) +
+  #annotate("text", size=3, x =40, y = 350000 , label = paste("Mean:", muDuration[1,2]), parse = TRUE) +
+  labs(title = 'Number of Trips by Trip Distance', x ="Trip Distance (Meters)", y = "Number of Trips") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line( size=.01, color="grey" ),
+        axis.text.y = element_text(margin = margin(t = 0, r = 2, b = 0, l = 3)),
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 3, l = 0)),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("LineDistanceVehicleType2.pdf", plot = LineDistanceVehicleType)
+
+#Density Plot 
+DensityDistanceVehicleType <- ggplot(dsAllTest, aes(x = `Trip Distance`, color = `Vehicle Type`)) +
+  geom_density() +
+  geom_vline(data=muDistance, aes(xintercept=`Trip Distance`, color= `Vehicle Type`), linetype="dashed") +
+    scale_x_continuous(breaks=c(0,1000,2000,3000,4000,5000,6000,7000,8000,9000,10000),
+                  limits = c(0,10000),
+                  labels = comma) +
+  labs(title = "Trip Distance Density by Vehicle Type", x ="Trip Distance (Meters)", y = "Density") +
+  theme(text = element_text(family="CM Roman"),
+      legend.title = element_blank(),
+      panel.grid.major.x = element_blank(), 
+      panel.grid.major.y = element_line( size=.01, color="grey" ),
+      axis.text.y = element_text(margin = margin(t = 0, r = 2, b = 0, l = 3)),
+      axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 3, l = 0)),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "grey"))
+ggsave("DensityDistanceVehicleType3.pdf", DensityDistanceVehicleType)
+
+
+#Average Distance of FFB is 3068m compared to 1573m for FFS
+#So they have longer duration and travel further
+
+TableDistanceCount <- dsAllTest %>%
+filter(`Trip Distance` < 2000) %>%
+group_by(`Vehicle Type`) %>%
+tally()
+
+#1,698,036 / 2,230,077 = 76.1% of trips are within 2km for FFS
+#31,369 / 69,234 = 45.3% of FBB trips are within 2km
+
+```
+
+#Speed Distribution by Vehicle Type
+```{r}
+
+#Aggregate column 5 (Trip Speed)
+muSpeed <- aggregate(dsAllTest[, 6], list(dsAllTest$`Vehicle Type`), mean)
+names(muSpeed)[1] <- "Vehicle Type"
+muSpeed$`Trip Speed` <- round(muSpeed$`Trip Speed`*3.6,0)
+
+LineSpeedVehicleType <- ggplot(data = dsAllTest, aes(x = `Trip Speed`*3.6, color = `Vehicle Type`)) + 
+  geom_line(aes(group = `Vehicle Type`), stat="bin") +
+  geom_vline(data=muSpeed, aes(xintercept=`Trip Speed`, color= `Vehicle Type`), linetype="dashed") +
+  xlim(0, 25) +
+  scale_y_continuous(label=comma) +
+  #annotate("text", size=3, x =40, y = 350000 , label = paste("Mean:", muDuration[1,2]), parse = TRUE) +
+  labs(title = 'Number of Trips by Vehicle Speed', x ="Trip Speed (km/h)", y = "Number of Trips") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        axis.text.y = element_text(margin = margin(t = 0, r = 2, b = 0, l = 3)),
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("LineSpeedVehicleType2.pdf", plot = LineSpeedVehicleType)
+
+#Density Plot 
+DensitySpeedVehicleType <- ggplot(dsAllTest, aes(x = `Trip Speed`*3.6, color = `Vehicle Type`)) +
+  geom_density() +
+  geom_vline(data=muSpeed, aes(xintercept=`Trip Speed`, color= `Vehicle Type`), linetype="dashed") +
+  xlim(0, 25) +
+  labs(title = "Trip Speed Density by Vehicle Type", x ="Trip Speed (km/h)", y = "Density") +
+  theme(text = element_text(family="CM Roman"),
+      legend.title = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.text.y = element_text(margin = margin(t = 0, r = 2, b = 0, l = 3)),
+      panel.grid.major.y = element_line( size=.01, color="grey" ), 
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "grey"))
+ggsave("DensitySpeedVehicleType2.pdf", DensitySpeedVehicleType)
+
+#As expected a pretty normal distribution, FFS are slightly more skewed to the left, with an average speed of 12 compares to just 9 of FFB
+```
+
+
+
+
+
+########### TEMPORAL COMPARISON CHARTS ##################
+
+#Test absolute line count
+```{r}
+dsAllTimes$Week <- as.Date(dsAllTimes$Week)
+
+TableDateCountAll <- dsAllTimes %>%
+group_by(Week, `Vehicle Type`) %>%
+tally()
+
+LineTripCountVehicleType <- ggplot(data = TableDateCountAll, aes(y = n, x = Week, color = `Vehicle Type`)) + 
+  geom_line() +
+  labs(title = 'Number of Trips by Vehicle Type', x ="Date", y = "Number of Trips") +
+  scale_x_date(date_labels="%b",
+             date_breaks  ="1 month") +
+  scale_y_continuous(label=comma, breaks=seq(0,175000,25000)) +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(), 
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 5, l = 0)),
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("LineTripCountVehicleType.pdf", plot = LineTripCountVehicleType)
+
+```
+
+
+#Number of trips over time by vehicle type and split between members / casual
+```{r}
+
+dsAllTest$`Start Time Date` <- as.Date(dsAllTest$`Start Time`)
+
+#Line chart of absolute count over time
+LineTripCountVehicleType <- ggplot(data = dsAllTest, aes(x = `Start Time Date`, color = `Vehicle Type`)) + 
+  geom_line(aes(group = `Vehicle Type`), stat="bin") +
+  labs(title = 'Number of Trips by Vehicle Type', x ="Date", y = "Number of Trips") +
+  scale_x_date(date_labels="%b",
+             date_breaks  ="1 month") +
+  scale_y_continuous(label=comma, breaks=seq(0,175000,25000)) +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(), 
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 5, l = 0)),
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("LineTripCountVehicleType.pdf", plot = LineTripCountVehicleType)
+
+
+#Table count over time SBB member & casual split
+TableDateCountSplit <- dsAllTest %>%
+group_by(round_date(`Start Time`, 'week'), `Vehicle Split`) %>%
+tally()
+
+names(TableDateCountSplit)[1] <- "Week"
+
+#Line chart of absolute count over time SBB member & casual split
+LineTripCountVehicleSplit <- ggplot(data = dsAllTimes, aes(x = `Start Time`, color = `Vehicle Split`)) + 
+geom_line(aes(group = `Vehicle Split`), stat="bin") +
+  labs(title = 'Number of Trips by Vehicle Type', x ="Date", y = "Number of Trips") +
+  scale_y_continuous(label=comma, breaks=seq(0,175000,25000)) +
+  scale_x_date(date_labels="%b",
+             date_breaks  ="1 month") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 5, l = 0)),
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("LineTripCountVehicleSplit2.pdf", plot = LineTripCountVehicleSplit)
+
+##Commentary
+#SSB
+#We notice from absolute frequency of weekly trips that usage of SBB is dominated by members, specifically its largest member group UT Students
+#FFS
+#Slow, setady decline of casual trips while FFS boomed, peaking in first week of October with 88,091 (107,071 in first week december) trips and remains constant despite drop in the first week of January.
+#FFB
+#Since large initial boost coinciding with FF market entry hype, followed by a quick decline and a boost in September (market entry Jump?)
+
+```
+
+Density By Vehicle Type Over Time Period
+```{r}
+
+dsAllTimes$`Start Time` <- as.Date(dsAllTimes$`Start Time`)
+
+#Split by Vehicle Type
+DensityVehicleType <- ggplot(dsAllTimes, aes(x= round_date(`Start Time`, 'day'), color= `Vehicle Type`)) +
+  geom_density() +
+  labs(title = "Trip Density by Membership Type", x ="Date", y = "Density") +
+        scale_x_date(date_labels="%b",
+               date_breaks  ="1 month") +
+  theme(text = element_text(family="CM Roman"),
+      legend.title = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 5, l = 0)),
+      panel.grid.major.y = element_line( size=.01, color="grey" ), 
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "grey"))
+ggsave("DensityVehicleType2.pdf", DensityVehicleType)
+
+#Split by SBB membership type
+LineMembershipSplitDate <- ggplot(dsAllTimes, aes(x= round_date(`Start Time`, 'day'), color= `Vehicle Split`)) +
+  geom_density() +
+  labs(title = "Trip Density by Membership Type", x ="Date", y = "Density") +
+      scale_x_date(date_labels="%b",
+               date_breaks  ="1 month") +
+  theme(text = element_text(family="CM Roman"),
+      legend.title = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 5, l = 0)),
+      panel.grid.major.y = element_line( size=.01, color="grey" ), 
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "grey"))
+
+ggsave("DensityVehicleSplit2.pdf", LineMembershipSplitDate)
+
+```
+
+#Modal share
+```{r}
+#Table count over time by Vehicle Type
+TableDateCountType <- dsAllTest %>%
+group_by(ymd(round_date(`Start Time`, 'week')), `Vehicle Type`) %>%
+tally()
+
+names(TableDateCountType)[1] <- "Week"
+
+TotalCountWeek <- aggregate(TableDateCountType$n,by=list(TableDateCountType$Week), sum)
+names(TotalCountWeek)[1] <- "Week"
+
+TableDateCountType <- merge(TableDateCountType, TotalCountWeek, by=c("Week"))
+names(TableDateCountType)[4] <- "Weekly Total"
+
+TableDateCountType$ModalShare <- TableDateCountType$n/TableDateCountType$`Weekly Total`
+
+TableDateCountType$Week <- as.Date(TableDateCountType$Week)
+
+#Make a cumulative trips chart showing number of trips and total
+#could make fill = factor(`Vehicle Type`, levels = c("FFS", "FFB","SBB"))
+CumTripsType <- ggplot(TableDateCountType, aes(x = `Week`, y= n, fill= `Vehicle Type`)) +
+  geom_area(position = 'stack') +
+  labs(title = 'Number of Weekly Trips by Vehicle Type', x ="Date", y = "Number of Trips") +
+  scale_y_continuous(label=comma, breaks=seq(0,100000,25000)) +
+    scale_x_date(date_labels="%b",
+               date_breaks  ="1 month") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 5, l = 0)),
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("CumTripsType2.pdf", plot = CumTripsType)
+
+#100% stackd line chart
+CumTripsPercent <- ggplot(TableDateCountType, aes(x=`Week`,y=`ModalShare`,group=`Vehicle Type`,fill=`Vehicle Type`)) + 
+  geom_area() +
+  labs(title = 'Modal Share by Date', x ="Date", y = "Modal Share") +
+  scale_y_continuous(labels=percent) +
+  scale_x_date(date_labels="%b",
+               date_breaks  ="1 month") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 5, l = 0)),
+        panel.grid.major.x = element_blank(), 
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("CumTripsPercent2.pdf", plot = CumTripsPercent)
+
+```
+
+
+################ Intra Week/Day Trip Distribution #################
+
+#HeatMap
+```{r}
+#may need library(plyr)
+dsHeatMap <- dsAllTest
+dsHeatMap$ymd <- dsHeatMap$`Start Time`
+dsHeatMap$month <- month(dsHeatMap$ymd, label = TRUE)
+dsHeatMap$year <- year(dsHeatMap$ymd)
+dsHeatMap$wday <- wday(dsHeatMap$ymd, label = TRUE)
+dsHeatMap$hour <- hour(dsHeatMap$ymd)
+attach(dsHeatMap)
+
+#FFS
+#Create summary table
+dsHeatMapFFS <- dsHeatMap %>%
+  filter(`Vehicle Type` == "FFS")
+
+TableDayHourFFS <- ddply(dsHeatMapFFS, c("hour", "wday"), summarise,
+                      N = length(ymd))
+
+#TableDayHourFFS$wday <- factor(dayHour$wday, levels=rev(levels(dayHour$wday)))
+TableDayHourFFS$wday <- factor(TableDayHourFFS$wday, levels=c("Mon","Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
+attach(TableDayHourFFS)
+
+scale_x
+#Heatmap
+
+HeatMapFFS <- ggplot(TableDayHourFFS, aes(hour, wday)) + 
+  geom_tile(aes(fill = N), colour = "white", na.rm = TRUE) +
+  scale_fill_gradient(low = "#FFF39D", high = "#FF0000", labels = comma) +
+  scale_x_continuous(breaks=c(23:0), labels=c(23:0),
+                  expand = c(0,0)) +
+  guides(fill=guide_legend(title="Total Trips")) +
+  labs(title = "Total FFS Trips by Day of Week and Time of Day",
+       x = "Time of Day", y = "Day of Week") +
+  theme_bw() + theme_minimal() + 
+  theme(text = element_text(family="CM Roman"),
+        axis.text.x = element_text(hjust = .5, vjust = -.5, margin = margin(t = 0, r = 0, b = 5, l = 0) ),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+ggsave("HeatMapFFS.pdf", plot = HeatMapFFS)
+
+#FFB
+#Create summary table
+dsHeatMapFFB <- dsHeatMap%>%
+  filter(`Vehicle Type` == "FFB")
+
+TableDayHourFFB <- ddply(dsHeatMapFFB, c("hour", "wday"), summarise,
+                      N = length(ymd))
+
+#TableDayHourFFS$wday <- factor(dayHour$wday, levels=rev(levels(dayHour$wday)))
+TableDayHourFFB$wday <- factor(TableDayHourFFB$wday, levels=c("Mon","Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
+attach(TableDayHourFFB)
+
+#Heatmap
+
+HeatMapFFB <- ggplot(TableDayHourFFB, aes(hour, wday)) + 
+  geom_tile(aes(fill = N), colour = "white", na.rm = TRUE) +
+  scale_fill_gradient(low = "#FFF39D", high = "#FF0000", labels = comma) +
+  scale_x_continuous(breaks=c(23:0), labels=c(23:0),
+                  expand = c(0,0)) +
+  guides(fill=guide_legend(title="Total Trips")) +
+  labs(title = "Total FFB Trips by Day of Week and Time of Day",
+       x = "Time of Day", y = "Day of Week") +
+  theme_bw() + theme_minimal() + 
+  theme(text = element_text(family="CM Roman"),
+        axis.text.x = element_text(hjust = .5, vjust = -.5, margin = margin(t = 0, r = 0, b = 5, l = 0) ),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+ggsave("HeatMapFFB.pdf", plot = HeatMapFFB)
+
+
+
+#SBB
+#Create summary table
+dsHeatMapSBB <- dsHeatMap%>%
+  filter(`Vehicle Type` == "SBB")
+
+TableDayHourSBB <- ddply(dsHeatMapSBB, c("hour", "wday"), summarise,
+                      N = length(ymd))
+
+#TableDayHourFFS$wday <- factor(dayHour$wday, levels=rev(levels(dayHour$wday)))
+TableDayHourSBB$wday <- factor(TableDayHourSBB$wday, levels=c("Mon","Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
+attach(TableDayHourSBB)
+
+#Heatmap
+
+HeatMapSBB <- ggplot(TableDayHourSBB, aes(hour, wday)) + 
+  geom_tile(aes(fill = N), colour = "white", na.rm = TRUE) +
+  scale_fill_gradient(low = "#FFF39D", high = "#FF0000", labels = comma) +
+  scale_x_continuous(breaks=c(23:0), labels=c(23:0),
+                  expand = c(0,0)) +
+  guides(fill=guide_legend(title="Total Trips")) +
+  labs(title = "Total SBB Trips by Day of Week and Time of Day",
+       x = "Time of Day", y = "Day of Week") +
+  theme_bw() + theme_minimal() + 
+  theme(text = element_text(family="CM Roman"),
+        axis.text.x = element_text(hjust = .5, vjust = -.5, margin = margin(t = 0, r = 0, b = 5, l = 0) ),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+ggsave("HeatMapSBB.pdf", plot = HeatMapSBB)
+
+```
+
+#Heatmap compare SBB members vs casual
+```{r}
+#Members
+#Create summary table
+dsHeatMapMember <- dsHeatMap %>%
+  filter(`Vehicle Split` == "SBB Member")
+
+TableDayHourMember <- ddply(dsHeatMapMember, c("hour", "wday"), summarise,
+                      N = length(ymd))
+
+TableDayHourMember$wday <- factor(TableDayHourMember$wday, levels=c("Mon","Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
+attach(TableDayHourMember)
+
+#Heatmap
+
+HeatMapMember <- ggplot(TableDayHourMember, aes(hour, wday)) + 
+  geom_tile(aes(fill = N), colour = "white", na.rm = TRUE) +
+  scale_fill_gradient(low = "#FFF39D", high = "#FF0000", labels = comma) +
+  scale_x_continuous(breaks=c(23:0), labels=c(23:0),
+                  expand = c(0,0)) +
+  guides(fill=guide_legend(title="Total Trips")) +
+  labs(title = "Total SBB Member Trips by Day of Week and Time of Day",
+       x = "Time of Day", y = "Day of Week") +
+  theme_bw() + theme_minimal() + 
+  theme(text = element_text(family="CM Roman"),
+        axis.text.x = element_text(hjust = .5, vjust = -.5, margin = margin(t = 0, r = 0, b = 5, l = 0) ),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+ggsave("HeatMapMember.pdf", plot = HeatMapMember)
+
+
+#Casuals
+#Create summary table
+dsHeatMapCasual <- dsHeatMap %>%
+  filter(`Vehicle Split` == "SBB Casual")
+
+TableDayHourCasual <- ddply(dsHeatMapCasual, c("hour", "wday"), summarise,
+                      N = length(ymd))
+
+TableDayHourCasual$wday <- factor(TableDayHourCasual$wday, levels=c("Mon","Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
+attach(TableDayHourCasual)
+
+#Heatmap
+
+HeatMapCasual <- ggplot(TableDayHourCasual, aes(hour, wday)) + 
+  geom_tile(aes(fill = N), colour = "white", na.rm = TRUE) +
+  scale_fill_gradient(low = "#FFF39D", high = "#FF0000", labels = comma) +
+  scale_x_continuous(breaks=c(23:0), labels=c(23:0),
+                  expand = c(0,0)) +
+  guides(fill=guide_legend(title="Total Trips")) +
+  labs(title = "Total SBB Casual Trips by Day of Week and Time of Day",
+       x = "Time of Day", y = "Day of Week") +
+  theme_bw() + theme_minimal() + 
+  theme(text = element_text(family="CM Roman"),
+        axis.text.x = element_text(hjust = .5, vjust = -.5, margin = margin(t = 0, r = 0, b = 5, l = 0) ),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+
+ggsave("HeatMapCasual.pdf", plot = HeatMapCasual)
+
+#Can confirm An2019 that SBB usage in Austin is also lower on weekdays than weekends
+```
+
+
+#Line Temporal Comparison Charts
+```{r}
+TableDayHourFFB$`Vehicle Type` <- "FFB"
+TableDayHourFFS$`Vehicle Type` <- "FFS"
+TableDayHourSBB$`Vehicle Type` <- "SBB"
+
+TableDayHourAll <- rbind(TableDayHourFFB,TableDayHourFFS,TableDayHourSBB)
+
+#Compare Days
+LineTimeTypeHorizontal <- ggplot(TableDayHourAll, aes(x=hour,y=N, group=(`Vehicle Type`)))+
+  stat_summary(aes(color=(`Vehicle Type`)), geom="line") +
+  facet_grid(~wday) +
+  scale_y_continuous(label=comma)+
+  labs(title = "Total Trips by Time & Day of Week", x ="Time", y = "Number of Trips") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line( size=.01, color="grey" ),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("LineTimeTypeHorizontal.pdf", plot = LineTimeTypeHorizontal)
+
+#Compare Times
+LineTimeTypeVertical <- ggplot(TableDayHourAll, aes(x=hour,y=N, group=(`Vehicle Type`)))+
+  stat_summary(aes(color=(`Vehicle Type`)), geom="line") +
+  facet_grid(vars(wday)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 14)) +
+  scale_y_continuous(label=comma, breaks=seq(0,30000,15000)) +
+  labs(title = "Total Trips by Time & Day of Week", x ="Time of Day", y = "Number of Trips") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        axis.text.y = element_text(margin = margin(t = 0, r = 3, b = 0, l = 5)),
+        axis.text.x = element_text(hjust = .5, vjust = -.5, margin = margin(t = 2, r = 0, b = 5, l = 0)),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line( size=.01, color="grey" ),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("LineTimeTypeVertical.pdf", plot = LineTimeTypeVertical)
+
+
+#Relative Frequency
+
+#Aggregate
+TableDayCountType <- TableDayHourAll %>%
+  group_by(wday, `Vehicle Type`) %>%
+  summarise_each(funs(sum))
+names(TableDayCountType)[4] <- "Day Total"
+TableDayCountType <- TableDayCountType[, -3]
+
+#Merge
+TableFreqType <- merge(TableDayHourAll, TableDayCountType, by=c("wday", "Vehicle Type"))
+#Calculate Relative Frequency
+TableFreqType$Frequency <- TableFreqType$N/TableFreqType$`Day Total`
+
+LineTimeTypeFreq <- ggplot(TableFreqType, aes(x=hour,y=Frequency, group=(`Vehicle Type`)))+
+  stat_summary(aes(color=(`Vehicle Type`)), geom="line") +
+  facet_grid(vars(wday)) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 14)) +
+  scale_y_continuous(label=percent, breaks=seq(0,.15,.05) ) +
+  labs(title = "Relative Trip Frequency by Time & Day of Week", x ="Time of Day", y = "Relative Frequency") +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        axis.text.y = element_text(margin = margin(t = 0, r = 3, b = 0, l = 5)),
+        axis.text.x = element_text(hjust = .5, vjust = -.5, margin = margin(t = 2, r = 0, b = 5, l = 0)),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line( size=.01, color="grey" ),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("LineTimeTypeFreq.pdf", plot = LineTimeTypeFreq)
+
+
+```
+
+################################# LIFETIME & UTILIZATION RATE ###################################
+
+#Calculating Vehicle Lifetime Per Device
+```{r}
+dsAllTimes <- dsAllTest
+#### Find First Trip Time ####
+#Make Device ID Unique - keep first trip of device
+
+#Order by start time
+dsFirstDeviceID <- dsAllTimes[with(dsAllTimes, order(dsAllTimes$`Start Time`)), ]
+#Subset dataframe where only unique IDS
+dsFirstDeviceID <- dsAllTimes[!duplicated(dsAllTimes$`Device ID`), ]
+#Keep only Device ID and Start Time columns
+dsFirstDeviceID <- dsFirstDeviceID[, c(2,7)]
+#Rename Start Time to First Time
+names(dsFirstDeviceID)[2] <- "First Time"
+
+#Order by start time
+dsLastDeviceID <- dsAllTimes[with(dsAllTimes, order(dsAllTimes$`Start Time`, decreasing = TRUE)), ]
+#Subset dataframe where only unique IDS
+dsLastDeviceID <- dsLastDeviceID[!duplicated(dsLastDeviceID$`Device ID`), ]
+#Keep only Device ID and Start Time columns
+dsLastDeviceID <- dsLastDeviceID[, c(2,7)]
+#Rename Start Time to First Time
+names(dsLastDeviceID)[2] <- "Last Time"
+
+
+#Merge Last and First Time
+dsLastFirstDeviceID <- merge(dsFirstDeviceID, dsLastDeviceID, by="Device ID")
+#Find date intervals of first and last sighting
+dsLastFirstDeviceID$Interval <- interval(dsLastFirstDeviceID$`First Time`, dsLastFirstDeviceID$`Last Time`)
+#Find Interval Length in Days
+dsLastFirstDeviceID$Lifespan <- int_length(dsLastFirstDeviceID$Interval/86400)
+
+#Add new columns to dsAllTimes
+dsAllTimes <- merge(dsAllTimes, dsLastFirstDeviceID, by="Device ID")
+
+```
+
+#Calculate average lifetimes by date
+```{r}
+#Add Vehicle Type to dsLastFirstDeviceID
+dsLifetimeType <- dsAllTimes[,c(1,3,24:27)]
+#get rid of duplicates
+dsLifetimeType <- dsLifetimeType[!duplicated(dsLifetimeType$`Device ID`), ]
+
+#Filter out all vehicles that made trips in 2019
+#dsLifetimeType <- dsLifetimeType %>%
+#  filter(`Last Time` < ymd("20190101") & `First Time` > ymd("20180501"))
+
+dsLifetimeType$`Last Time` <- as.Date(dsLifetimeType$`Last Time`)
+
+LineLifetimeType <- ggplot(data = dsLifetimeType, aes(x = round_date(`Last Time`, "week"), y= `Lifespan`, color = `Vehicle Type`)) + 
+stat_summary(fun="mean", geom = "line") + geom_smooth(se = F) +
+  labs(title = 'Average Vehicle Lifespan', x ="Date", y = "Average Vehicle Lifespan (Days)") +
+  scale_y_continuous(label=comma, breaks=seq(0,250,10)) +
+  scale_x_date(date_labels="%b",date_breaks  ="1 month",limits = as.Date(c('2018-04-01', '2018-12-31'))) +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 5, l = 0)),
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey"))
+ggsave("LineLifetimeType.pdf", plot = LineLifetimeType)
+```
+
+#Vehicle Fleet Size & Utilization Rate (Trips/(Active Vehicles per Month*Days in Month))
+```{r}
+
+#Create Week Dates
+dsAllTimes$MonthDate <- round_date(dsAllTimes$`Start Time`, "month")
+#Find Number of Unique Device Trips Per Month
+dsDevicesWeek <- unique(dsAllTimes[c("Device ID", "MonthDate", "Vehicle Type")])
+
+
+#Count number of devices per Vehicle Type per Month
+TableDeviceMonth <- dsDevicesWeek %>%
+group_by(`MonthDate`, `Vehicle Type`) %>%
+tally()
+
+names(TableDeviceMonth)[3] <- "Fleet Size"
+
+TableDeviceMonth$DaysMonth <- days_in_month(TableDeviceMonth$MonthDate)
+
+TripCountMonth <- dsAllTimes %>%
+group_by(`MonthDate`, `Vehicle Type`) %>%
+tally()
+names(TripCountMonth)[3] <- "TripsMonth"
+
+TableCountMonth <- merge(TableDeviceMonth, TripCountMonth, by=c("MonthDate", "Vehicle Type"))
+
+TableCountMonth$URate <- (TableCountMonth$TripsMonth)/(TableCountMonth$`Fleet Size`*TableCountMonth$DaysMonth)
+
+
+
+TableCountMonth$MonthDate <- as.Date(TableCountMonth$MonthDate)
+
+#Fleet Size over Time
+LineFleetSize <- ggplot(TableCountMonth, aes(x= MonthDate, y= `Fleet Size`, group=(`Vehicle Type`)))+
+  stat_summary(aes(color=(`Vehicle Type`)), geom="line") +
+  labs(title = "Fleet Size (Monthly Active Vehicles) over Time", x ="Date", y = "Number of Vehicles") +
+  scale_x_date(date_labels="%b",
+               date_breaks  ="1 month",
+               limits = as.Date(c('2018-04-01', '2018-12-15'))) +
+  scale_y_continuous(label=comma, limits =c(0,15000), breaks=seq(0,15000,2500)) +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 5, l = 0)),
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey")) 
+
+ggsave("LineFleetSize.pdf", plot = LineFleetSize)
+
+#Peeks at 13,543 for FFS, Stays constant for SBB at around 470, peaks for FBB at 553 but then declines slightly to 480 in December.
+
+#Utilization Rate
+LineURate <- ggplot(TableCountMonth, aes(x= MonthDate, y= URate, group=(`Vehicle Type`)))+
+  stat_summary(aes(color=(`Vehicle Type`)), geom="line") +
+  labs(title = "Utilization Rate (Average Number of Daily Trips / Vehicle)", x ="Date", y = "Average Daily Trips / Vehicle") +
+  scale_x_date(date_labels="%b",
+               date_breaks  ="1 month",
+               limits = as.Date(c('2018-04-01', '2018-12-15'))) +
+  scale_y_continuous(label= comma) +
+  theme(text = element_text(family="CM Roman"),
+        legend.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        axis.text.y = element_text(margin = margin(t = 0, r = 2, b = 0, l = 2)),
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 5, l = 0)),
+        panel.grid.major.y = element_line( size=.01, color="grey" ), 
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "grey")) 
+
+ggsave("LineURate.pdf", plot = LineURate)
+
+```
+
+```{r}
+TableCountMonth$MonthDate <- as.Date(TableCountMonth$MonthDate)  
+scale_x_date(date_labels="%b",
+               date_breaks  ="1 month",
+               limits = as.Date(c('2018-04-01', '2018-12-15'))) +
+        axis.text.y = element_text(margin = margin(t = 0, r = 2, b = 0, l = 2)),
+        axis.text.x = element_text(margin = margin(t = 2, r = 0, b = 5, l = 0)),
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
